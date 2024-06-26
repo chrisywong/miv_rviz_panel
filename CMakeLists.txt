@@ -13,6 +13,10 @@ find_package(catkin REQUIRED COMPONENTS
   image_transport
   cv_bridge
   roscpp
+  gazebo_msgs
+  tf2_geometry_msgs
+  tf2_ros
+  sound_play
 )
 
 catkin_package(

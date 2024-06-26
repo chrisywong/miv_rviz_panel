@@ -1,222 +1,305 @@
-#include <stdio.h>
-
-#include <QPainter>
-#include <QLineEdit>
-#include <QGroupBox>
-#include <QHBoxLayout>
-#include <QGridLayout>
-#include <QLabel>
-#include <QImage>
-#include <QTimer>
-
 #include "miv_rviz_plugin/multiview_panel.h"
+#include <QVBoxLayout>
+#include <QPainter>
+#include <QLabel>
+#include <gazebo_msgs/LinkStates.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_ros/transform_listener.h>
+#include <QPushButton>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <sound_play/SoundRequest.h>
+
+
 
 namespace miv_rviz_plugin
 {
-  MultiViewPanel::MultiViewPanel(QWidget* parent):
-  rviz::Panel( parent )
-  {
-    QGroupBox* view_layout_[4];
-    QVBoxLayout* view_box_layout_[4];
-    QHBoxLayout* topic_layout_[4];
-    char txt_view[10];
-    char txt_topic[25];
+    MultiViewPanel::MultiViewPanel(QWidget* parent)
+        : rviz::Panel(parent)
+    {
+        QVBoxLayout* layout = new QVBoxLayout(this);
+        compositeArrowLabel_ = new QLabel(this);
+        layout->addWidget(compositeArrowLabel_);
 
-    for(int i{0}; i<4; ++i){
-      // Group View Layout
-      sprintf(txt_view, "View %i", i);
-      view_layout_[i] = new QGroupBox(txt_view);
-      view_box_layout_[i] = new QVBoxLayout;
-      img_view[i] = new QLabel();
-      img_view[i] -> setText("NO IMAGE");
-      img_view[i] -> setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
-      img_view[i] -> setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-      img_view[i] -> setScaledContents(true);
-      view_box_layout_[i] -> addWidget(img_view[i]);
+        QPushButton* yesButton = new QPushButton("Yes", this);
+        layout->addWidget(yesButton);
+        connect(yesButton, &QPushButton::clicked, this, &MultiViewPanel::onYesButtonClicked);
 
-      view_layout_[i] -> setLayout(view_box_layout_[i]);
-      view_layout_[i] -> setAlignment(Qt::AlignHCenter);
 
-      // Edittext layout
-      auto t_layout = new QHBoxLayout;
-      sprintf(txt_topic, "Image %i topic: ", i);
-      itopic_edit[i] = new QLineEdit;
+        QPushButton* noButton = new QPushButton("No", this);
+        layout->addWidget(noButton);
+        connect(noButton, &QPushButton::clicked, this, &MultiViewPanel::onNoButtonClicked);
 
-      t_layout->addWidget( new QLabel( txt_topic ));
-      t_layout->addWidget(itopic_edit[i]);
-      topic_layout_[i] = t_layout;
+
+        QPushButton* repeatButton = new QPushButton("Repeat Question", this);
+        layout->addWidget(repeatButton);
+        connect(repeatButton, &QPushButton::clicked, this, &MultiViewPanel::onRepeatButtonClicked);
+
+
+        setLayout(layout);
+
+        tfSub_ = nh_.subscribe("/tf", 1, &MultiViewPanel::tfCallback, this);
+
+        //linkStatesSub_ = nh_.subscribe("/gazebo/link_states", 1, &MultiViewPanel::linkStatesCallback, this);
+
+        jointStatesSub_ = nh_.subscribe("/joint_states",1, &MultiViewPanel::jointStatesCallback, this);
+        ArrowPub_ = nh_.advertise<visualization_msgs::Marker>("arrow_marker", 1);
+        sound_pub_ = nh_.advertise<sound_play::SoundRequest>("robotsound", 1);
+
+        updateCompositeImage(0,0);
     }
 
-    // Main Layout
-    QGridLayout* layout = new QGridLayout;
-    //img_grid
-    for(int i{0};i<4;++i)
-      layout->addWidget( view_layout_[i] , (i > 1) ? 1 : 0, (i % 2 == 0) ? 0 : 1);
 
-    //Topic editbox
-    for(int j{0};j<4;++j)
-      layout->addLayout(topic_layout_[j], j+2, 0, 1, 2);
+    void MultiViewPanel::updateCompositeImage(double cameraYaw, double wristYaw) {
+        QPixmap compositePixmap(240, 180); // Adjusted for additional drawing space
+        compositePixmap.fill(Qt::transparent);
 
-    setLayout( layout );
+        QPainter painter(&compositePixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
 
-    // Next we make signal connections.
-    connect( itopic_edit[0], SIGNAL( editingFinished() ), this, SLOT( updateImgTopic_0() ));
-    connect( itopic_edit[1], SIGNAL( editingFinished() ), this, SLOT( updateImgTopic_1() ));
-    connect( itopic_edit[2], SIGNAL( editingFinished() ), this, SLOT( updateImgTopic_2() ));
-    connect( itopic_edit[3], SIGNAL( editingFinished() ), this, SLOT( updateImgTopic_3() ));
-  }
+        // Draw robot base first
+        QRectF baseRect(40, 80, 120, 60);
+        painter.setBrush(Qt::lightGray);
+        painter.drawRoundedRect(baseRect, 10, 10);
 
-  void MultiViewPanel::img2rviz(const sensor_msgs::ImageConstPtr& msg, QLabel *target_disp)
-  {
-    auto fmt{msg->encoding};
-    auto img_enc{"rgb8"};                     //Default to rgb8
-    auto q_format{QImage::Format_RGB888};     //QImg format
 
-    try
-    {
-      namespace i_enc = sensor_msgs::image_encodings;
+        QPointF baseCenter = baseRect.center();
 
-      if (fmt == i_enc::RGBA8)
-      {
-        img_enc = "rgba8";
-        q_format = QImage::Format_RGBA8888;
-      }
-      else if (fmt == i_enc::TYPE_8UC1 || fmt == i_enc::TYPE_8SC1 || fmt == i_enc::MONO8)
-      {
-        img_enc = (fmt == i_enc::MONO8) ? "mono8" : "";
-        q_format = QImage::Format_Grayscale8;
-      }
-      auto img = cv_bridge::toCvShare(msg, img_enc)->image;
-      QImage qt_img( static_cast<uchar*>(img.data), img.cols, img.rows, img.step, q_format); //Convert to qt format
-      target_disp->setPixmap(QPixmap::fromImage(qt_img));
+        QPointF redArrowStartPoint = baseCenter - QPointF(0, 30);
+
+
+        QPointF blueArrowStartPoint = baseCenter + QPointF(70, 0);
+
+        drawArrow(&painter, redArrowStartPoint, 0, Qt::red, 60);
+
+        drawArrow(&painter, baseCenter, -static_cast<int>(cameraYaw), Qt::green, 40);
+
+
+        drawArrow(&painter, blueArrowStartPoint, -static_cast<int>(wristYaw), Qt::blue, 30);
+
+        compositeArrowLabel_->setPixmap(compositePixmap);
     }
 
-    catch (cv_bridge::Exception& e)
+
+    void MultiViewPanel::jointStatesCallback(const sensor_msgs::JointState::ConstPtr& msg)
     {
-      ROS_ERROR("Could not convert from '%s' to '%s -> QIMAGE: %i'.", fmt.c_str(), img_enc, q_format);
-    }
-  }
+        double headPanAngleRadians = 0.0;
+        double wristYawAngleRadians = 0.0;
 
-  void MultiViewPanel::img0_Callback(const sensor_msgs::ImageConstPtr& msg)
-  {
-    img2rviz(msg, img_view[0]);
-  }
-
-  void MultiViewPanel::img1_Callback(const sensor_msgs::ImageConstPtr& msg)
-  {
-    img2rviz(msg, img_view[1]);
-  }
-
-  void MultiViewPanel::img2_Callback(const sensor_msgs::ImageConstPtr& msg)
-  {
-    img2rviz(msg, img_view[2]);
-  }
-
-  void MultiViewPanel::img3_Callback(const sensor_msgs::ImageConstPtr& msg)
-  {
-    img2rviz(msg, img_view[3]);
-  }
-
-  // Read the topic name from the QLineEdit
-  void MultiViewPanel::locate_set_topic(const int &id){
-    setTopic( itopic_edit[id],  img_output_topic[id], it_[id], img_sub[id], id);
-  }
-
-  void MultiViewPanel::updateImgTopic_0()
-  {
-    locate_set_topic(0);
-  }
-
-  void MultiViewPanel::updateImgTopic_1()
-  {
-    locate_set_topic(1);
-  }
-
-  void MultiViewPanel::updateImgTopic_2()
-  {
-    locate_set_topic(2);
-  }
-
-  void MultiViewPanel::updateImgTopic_3()
-  {
-    locate_set_topic(3);
-  }
-
-  // Set the topic name we are subscribing to.
-  void MultiViewPanel::setTopic(
-    QLineEdit * line_edit,
-    QString& target_topic,
-    const image_transport::ImageTransport *imt,
-    image_transport::Subscriber &img_sub,
-    const int cb_id	)
-    {
-      // Only take action if the name has changed.
-      if( line_edit->text() != target_topic )
-      {
-        target_topic = line_edit->text();
-        if( target_topic != "" )
-        {
-          image_transport::ImageTransport it(nh_);      // Subscribe img
-          imt = &it;
-          auto cb = {
-            &MultiViewPanel::img0_Callback,
-            &MultiViewPanel::img1_Callback,
-            &MultiViewPanel::img2_Callback,
-            &MultiViewPanel::img3_Callback
-          };
-          // Sanitise data
-          auto tp{target_topic.toStdString()};
-          tp.erase(std::remove_if(tp.begin(), tp.end(),
-                           [](char c) {
-                               return (c == ' ' || c == '\n' || c == '\r' ||
-                                       c == '\t' || c == '\v' || c == '\f');
-                           }),
-                           tp.end());
-          line_edit->setText(QString::fromStdString(tp));           // Update sanitised string
-          img_sub = it.subscribe(tp, 1, cb.begin()[cb_id], this);
+        for (size_t i = 0; i < msg->name.size(); ++i) {
+            if (msg->name[i] == "joint_head_pan") {
+                headPanAngleRadians = msg->position[i];
+            } else if (msg->name[i] == "joint_wrist_yaw") {
+                wristYawAngleRadians = msg->position[i];
+            }
         }
-        Q_EMIT configChanged();
-      }
+
+        // Convert radians to degrees
+        double headPanAngleDegrees = headPanAngleRadians * (180.0 / M_PI);
+        double wristYawAngleDegrees = (wristYawAngleRadians * (180.0 / M_PI))-90;
+        updateCompositeImage(headPanAngleDegrees, wristYawAngleDegrees);
+    }
+    void MultiViewPanel::drawArrow(QPainter *painter, QPointF center, int angle, const QColor &color, int length) {
+        painter->save();
+        painter->translate(center);
+        painter->rotate(angle);
+
+        // Arrow stick
+        painter->setPen(QPen(color, 3)); // Set the color and thickness of the line
+        painter->drawLine(0, 0, 0, -length); // Draw line upwards from center
+
+        // Arrow head
+        int headSize = 10; // Size of the arrow head
+        QPolygon arrowHead;
+        arrowHead << QPoint(-headSize, -length) << QPoint(0, -length-headSize)
+                  << QPoint(headSize, -length);
+        painter->setBrush(color); // Fill color for the arrow head
+        painter->drawPolygon(arrowHead);
+
+        painter->restore();
     }
 
-    // Save all configuration data from this panel to the given Config object.
-    void MultiViewPanel::save( rviz::Config config ) const
-    {
-      rviz::Panel::save( config );
-      char tmp[10];
-      for(int i{0}; i<4; ++i){
-        sprintf(tmp,"img_%i",i);
-        config.mapSetValue( tmp, img_output_topic[i] );
-      }
+
+
+    double MultiViewPanel::quaternionToYaw(const geometry_msgs::Quaternion& q) {
+        // Calculate yaw (rotation around z-axis)
+        double siny_cosp = 2 * (q.w * q.z + q.x * q.y);
+        double cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
+        double yaw = std::atan2(siny_cosp, cosy_cosp);
+        return yaw;
     }
 
-    // Load all configuration data for this panel from the given Config object.
-    void MultiViewPanel::load( const rviz::Config& config )
-    {
-      rviz::Panel::load( config );
-      QString topic;
-      if( config.mapGetString( "img_0", &topic ))
-      {
-        itopic_edit[0]->setText( topic );
-        updateImgTopic_0();
-      }
-      if( config.mapGetString( "img_1", &topic ))
-      {
-        itopic_edit[1]->setText( topic );
-        updateImgTopic_1();
-      }
-      if( config.mapGetString( "img_2", &topic ))
-      {
-        itopic_edit[2]->setText( topic );
-        updateImgTopic_2();
-      }
-      if( config.mapGetString( "img_3", &topic ))
-      {
-        itopic_edit[3]->setText( topic );
-        updateImgTopic_3();
-      }
-    }
-  }
+    void MultiViewPanel::tfCallback(const tf2_msgs::TFMessage::ConstPtr& msg) {
+        for (const auto& transform : msg->transforms) {
+            if (transform.child_frame_id == "link_head_pan" || transform.child_frame_id == "link_wrist_yaw") {
+                // Extract the pose
+                geometry_msgs::Pose pose;
+                pose.position.x = transform.transform.translation.x;
+                pose.position.y = transform.transform.translation.y;
+                pose.position.z = transform.transform.translation.z;
+                //pose.orientation = transform.transform.rotation;
 
-  #include <pluginlib/class_list_macros.h>
-  PLUGINLIB_EXPORT_CLASS(miv_rviz_plugin::MultiViewPanel,rviz::Panel )
+
+                // Now call publishArrowMarkerForJoint with this new pose
+                int id = (transform.child_frame_id == "link_head_pan") ? 1 : 2;
+                std::string ns = (transform.child_frame_id == "link_head_pan") ? "head_pan_direction" : "wrist_yaw_direction";
+                if (transform.child_frame_id =="link_wrist_yaw"){
+                  publishArrowMarker(transform.child_frame_id, pose, id, ns, 0.0, 0.0, 1.0, true);
+                }
+                else{
+                publishArrowMarker(transform.child_frame_id, pose, id, ns, 0.0, 1.0, 0.0, false);
+            }
+                }
+        }
+    }
+
+
+
+    void MultiViewPanel::publishArrowMarker(const std::string& joint_frame_id, const geometry_msgs::Pose& pose, int id, const std::string& ns, float r, float g, float b, bool alignWithYAxis = false) {
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = joint_frame_id; // Use a consistent reference frame, like "base_link"
+        marker.header.stamp = ros::Time::now();
+        marker.ns = ns;
+        marker.id = id;
+        marker.type = visualization_msgs::Marker::ARROW;
+        marker.action = visualization_msgs::Marker::ADD;
+
+        if (alignWithYAxis) {
+            // Set the orientation to align with the Y-axis directly
+            tf2::Quaternion orientationAlignedWithY;
+            orientationAlignedWithY.setRPY(0, 0, M_PI / 2); // Rotate 90 degrees around Z-axis
+            marker.pose.orientation = tf2::toMsg(orientationAlignedWithY);
+        } else {
+            // Use the original orientation
+            marker.pose = pose;
+        }
+
+        marker.scale.x = 0.3; // Length
+        marker.scale.y = 0.03; // Width
+        marker.scale.z = 0.05; // Height
+        marker.color.a = 1.0; // Opacity
+        marker.color.r = r;
+        marker.color.g = g;
+        marker.color.b = b;
+
+        ArrowPub_.publish(marker);
+    }
+
+
+
+
+
+    void MultiViewPanel::publishArrowMarkerForJoint(const std::string& joint_frame_id, int id, const std::string& ns, float r, float g, float b, const geometry_msgs::Pose& pose) {
+        visualization_msgs::Marker marker;
+        marker.header.frame_id =joint_frame_id;
+        marker.header.stamp = ros::Time::now();
+        marker.ns = ns;
+        marker.id = id;
+        marker.type = visualization_msgs::Marker::ARROW;
+        marker.action = visualization_msgs::Marker::ADD;
+
+        // Set pose directly from the argument
+        marker.pose = pose;
+
+        marker.scale.x = 0.1; // Arrow length
+        marker.scale.y = 0.02; // Arrow width
+        marker.scale.z = 0.02; // Arrow height
+
+        marker.color.a = 1.0;
+        marker.color.r = r;
+        marker.color.g = g;
+        marker.color.b = b;
+
+        ArrowPub_.publish(marker);
+    }
+
+
+
+    void MultiViewPanel::onNoButtonClicked() {
+      ROS_INFO("No button clicked");
+      std::string s = "No";
+      std::string voice = "voice_cmu_us_slt_arctic_hts"; //voice_us1_mbrola
+      float volume = 1.0;
+
+    //   ROS_INFO("Saying: %s", s.c_str());
+    //   ROS_INFO("Voice: %s", voice.c_str());
+    //   ROS_INFO("Volume: %f", volume);
+
+      if (sound_pub_ && sound_pub_.getNumSubscribers() > 0) {
+              sound_play::SoundRequest sound;
+              sound.sound = sound_play::SoundRequest::SAY;
+              sound.command = sound_play::SoundRequest::PLAY_ONCE;
+              sound.volume = volume;
+              sound.arg = s;
+              sound.arg2 = voice;
+
+              sound_pub_.publish(sound);
+              ROS_INFO("Sound message published.");
+          } else {
+              ROS_WARN("No subscribers found on the sound topic, not publishing sound.");
+          }
+    }
+
+    void MultiViewPanel::onYesButtonClicked() {
+        ROS_INFO("Yes button clicked");
+        std::string s = "Yes";
+        std::string voice = "voice_cmu_us_slt_arctic_hts"; //voice_us1_mbrola
+        float volume = 1.0;
+
+        // ROS_INFO("Saying: %s", s.c_str());
+        // ROS_INFO("Voice: %s", voice.c_str());
+        // ROS_INFO("Volume: %f", volume);
+
+        if (sound_pub_ && sound_pub_.getNumSubscribers() > 0) {
+                sound_play::SoundRequest sound;
+                sound.sound = sound_play::SoundRequest::SAY;
+                sound.command = sound_play::SoundRequest::PLAY_ONCE;
+                sound.volume = volume;
+                sound.arg = s;
+                sound.arg2 = voice;
+
+                sound_pub_.publish(sound);
+                ROS_INFO("Sound message published.");
+            } else {
+                ROS_WARN("No subscribers found on the sound topic, not publishing sound.");
+            }
+    }
+
+
+    void MultiViewPanel::onRepeatButtonClicked() {
+      ROS_INFO("Repeat button clicked");
+      std::string s = "Can you please repeat the question";
+      std::string voice = "voice_cmu_us_slt_arctic_hts"; //voice_us1_mbrola
+      float volume = 1.0;
+
+    //   ROS_INFO("Saying: %s", s.c_str());
+    //   ROS_INFO("Voice: %s", voice.c_str());
+    //   ROS_INFO("Volume: %f", volume);
+
+      if (sound_pub_ && sound_pub_.getNumSubscribers() > 0) {
+              sound_play::SoundRequest sound;
+              sound.sound = sound_play::SoundRequest::SAY;
+              sound.command = sound_play::SoundRequest::PLAY_ONCE;
+              sound.volume = volume;
+              sound.arg = s;
+              sound.arg2 = voice;
+
+              sound_pub_.publish(sound);
+              ROS_INFO("Sound message published.");
+          } else {
+              ROS_WARN("No subscribers found on the sound topic, not publishing sound.");
+          }
+    }
+
+
+
+      MultiViewPanel::~MultiViewPanel() {}
+}
+
+
+
+
+#include <pluginlib/class_list_macros.h>
+PLUGINLIB_EXPORT_CLASS(miv_rviz_plugin::MultiViewPanel, rviz::Panel)
